@@ -11,6 +11,14 @@ export async function discoverPolicies(query: string) {
   return data;
 }
 
+export async function discoverChat(
+  messages: { role: string; content: string }[],
+  session_policy_ids: string[] = []
+) {
+  const { data } = await API.post("/api/discover/chat", { messages, session_policy_ids });
+  return data;
+}
+
 export async function comparePolicies(policy_ids: string[]) {
   const { data } = await API.post("/api/compare", { policy_ids });
   return data;
@@ -69,5 +77,32 @@ export async function matchConditions(conditions: object[]) {
 
 export async function gapAnalysis(policy_id: string) {
   const { data } = await API.get(`/api/gap-analysis/${policy_id}`);
+  return data;
+}
+
+// ── Chat Memory ───────────────────────────────────────────────────────────────
+
+export async function createChatSession(user_id = "anonymous", session_name?: string) {
+  const { data } = await API.post("/api/chat/sessions", { user_id, session_name });
+  return data; // { session_id, created_at }
+}
+
+export async function listChatSessions() {
+  const { data } = await API.get("/api/chat/sessions");
+  return data; // { sessions: [] }
+}
+
+export async function getChatSession(session_id: string) {
+  const { data } = await API.get(`/api/chat/sessions/${session_id}`);
+  return data; // { session, messages }
+}
+
+export async function sendChatMessage(session_id: string, content: string) {
+  const { data } = await API.post(`/api/chat/sessions/${session_id}/messages`, { content });
+  return data; // { type, message, policies?, extracted_requirements?, session_id }
+}
+
+export async function deleteChatSession(session_id: string) {
+  const { data } = await API.delete(`/api/chat/sessions/${session_id}`);
   return data;
 }

@@ -190,73 +190,196 @@ class CoverageGapScanner:
 
 # ── Policy Ranker ────────────────────────────────────────────────────────────
 
+def hard_filter(policies: list[dict], req: dict) -> list[dict]:
+    """
+    Strict pre-filter before scoring. No LLM. No fallback.
+    Policies that fail ANY hard criterion are excluded entirely.
+
+    Hard criteria:
+    - premium_min > budget_max → excluded (budget is a hard cap)
+    - maternity required but policy doesn't cover → excluded
+    - opd required but policy doesn't cover → excluded
+    - mental_health required but policy doesn't cover → excluded
+    - preferred_type set but doesn't match → excluded
+    """
+    out = []
+    budget = req.get("budget_max")
+    needs = req.get("needs", [])
+    ptype = req.get("preferred_type")
+
+    for p in policies:
+        if budget and p.get("premium_min", 0) > budget:
+            continue
+        if "maternity" in needs and not p.get("covers_maternity"):
+            continue
+        if "opd" in needs and not p.get("covers_opd"):
+            continue
+        if "mental_health" in needs and not p.get("covers_mental_health"):
+            continue
+        if ptype and p.get("type") != ptype:
+            continue
+        out.append(p)
+    return out
+
+
+def _coverage_strength(score: int) -> str:
+    if score >= 70:
+        return "high"
+    if score >= 45:
+        return "medium"
+    return "low"
+
+
+def _estimated_waiting(policy: dict, req: dict) -> str:
+    parts = []
+    ped = policy.get("waiting_period_preexisting_years")
+    if ped:
+        parts.append(f"{ped} years for pre-existing conditions")
+    mat_months = policy.get("waiting_period_maternity_months")
+    needs = req.get("needs", [])
+    if "maternity" in needs and mat_months:
+        parts.append(f"{mat_months} months for maternity")
+    general = policy.get("waiting_period_general", 30)
+    parts.append(f"{general} days initial waiting period")
+    return ", ".join(parts) if parts else "Not specified"
+
+
 class PolicyRanker:
-    """Scores and ranks catalog policies for a user's extracted requirements."""
+    """
+    Deterministic policy ranking engine.
+
+    Two-phase:
+    1. hard_filter() — eliminates policies that fail hard constraints
+    2. weighted_score() — scores survivors from 0 starting point
+    """
 
     def rank(self, requirements: dict, policies: list[dict]) -> list[dict]:
         scored = []
         for policy in policies:
-            score, reasons = self._score(requirements, policy)
-            scored.append({**policy, "match_score": score, "match_reasons": reasons})
+            score, why, tradeoffs = self._weighted_score(requirements, policy)
+            strength = _coverage_strength(score)
+            scored.append({
+                **policy,
+                "match_score": score,
+                # Legacy field kept for existing frontend compatibility
+                "match_reasons": why,
+                # New rich fields
+                "why_matched": why,
+                "tradeoffs": tradeoffs,
+                "estimated_waiting_period": _estimated_waiting(policy, requirements),
+                "coverage_strength": strength,
+            })
         return sorted(scored, key=lambda x: x["match_score"], reverse=True)
 
-    def _score(self, req: dict, policy: dict) -> tuple[int, list[str]]:
-        score = 50
-        reasons = []
+    def _weighted_score(self, req: dict, policy: dict) -> tuple[int, list[str], list[str]]:
+        """
+        Score starts at 0. Each factor adds or subtracts.
+        Clamped to [0, 100].
 
-        # Budget fit
-        budget = req.get("budget_max", 0)
-        if budget and policy.get("premium_min"):
-            if policy["premium_min"] <= budget:
-                score += 15
-                reasons.append(f"Within budget (from ₹{policy['premium_min']:,}/yr)")
-            else:
-                score -= 20
-                reasons.append(f"Exceeds budget (starts ₹{policy['premium_min']:,}/yr)")
-
-        # Coverage needs matching
+        Points:
+          +30  maternity covered (if requested)
+          +25  pre-existing conditions not in exclusions (if preexisting provided)
+          +20  premium_min <= budget
+          +10  network_hospitals > 5000
+          +10  waiting_period_preexisting_years <= 2
+          + 5  restoration_benefit = true
+          + 5  opd covered (if requested)
+          - 5  opd requested but not covered
+          -10  co_pay_percent > 0
+          -10  room_rent_limit contains "%" (proportional deduction risk)
+          -15  waiting_period_preexisting_years >= 4
+          -20  policy explicitly excludes a requested pre-existing condition
+        """
+        score = 0
+        why: list[str] = []
+        tradeoffs: list[str] = []
         needs = req.get("needs", [])
-        need_map = {
-            "maternity": ("covers_maternity", 20),
-            "opd": ("covers_opd", 10),
-            "mental_health": ("covers_mental_health", 8),
-            "ayush": ("covers_ayush", 5),
-            "dental": ("covers_dental", 5),
-            "critical_illness": ("covers_critical_illness", 15),
-        }
-        for need in needs:
-            for keyword, (field, points) in need_map.items():
-                if keyword in need.lower() and policy.get(field):
-                    score += points
-                    reasons.append(f"Covers {need}")
+        budget = req.get("budget_max")
+        preexisting = req.get("preexisting_conditions") or []
+        exclusions = [e.lower() for e in (policy.get("exclusions") or [])]
+
+        # Maternity
+        if "maternity" in needs:
+            if policy.get("covers_maternity"):
+                score += 30
+                why.append("Covers maternity")
+            else:
+                tradeoffs.append("Maternity not covered")
+
+        # OPD
+        if "opd" in needs:
+            if policy.get("covers_opd"):
+                score += 5
+                why.append("OPD coverage included")
+            else:
+                score -= 5
+                tradeoffs.append("OPD not covered")
+
+        # Mental health
+        if "mental_health" in needs:
+            if policy.get("covers_mental_health"):
+                score += 5
+                why.append("Mental health coverage")
 
         # Pre-existing conditions
-        preexisting = req.get("preexisting_conditions") or []
-        exclusions = policy.get("exclusions") or []
-        for condition in preexisting:
-            for excl in exclusions:
-                if condition.lower() in excl.lower():
-                    score -= 25
-                    reasons.append(f"May exclude {condition} (check exclusions list)")
+        if preexisting:
+            excluded_any = any(
+                any(word in excl for word in cond.lower().split() if len(word) > 3)
+                for cond in preexisting
+                for excl in exclusions
+            )
+            if not excluded_any:
+                score += 25
+                why.append("Pre-existing conditions not in exclusion list")
+            else:
+                score -= 20
+                hit = next(
+                    (c for c in preexisting if any(
+                        any(w in excl for w in c.lower().split() if len(w) > 3)
+                        for excl in exclusions
+                    )), preexisting[0]
+                )
+                tradeoffs.append(f"'{hit}' may be excluded — verify policy wording")
 
-        # Waiting period penalty
-        ped_years = policy.get("waiting_period_preexisting_years", 4)
-        if ped_years <= 2:
-            score += 10
-            reasons.append(f"Short pre-existing wait ({ped_years} years)")
-        elif ped_years >= 4:
-            score -= 10
-            reasons.append(f"Long pre-existing wait ({ped_years} years)")
+        # Budget
+        if budget:
+            prem_min = policy.get("premium_min", 0)
+            if prem_min <= budget:
+                score += 20
+                why.append(f"Premium from ₹{prem_min:,}/yr (within ₹{budget:,} budget)")
+            else:
+                tradeoffs.append(f"Lowest premium ₹{prem_min:,}/yr exceeds budget")
 
-        # Network hospitals bonus
+        # Network
         network = policy.get("network_hospitals", 0)
-        if network >= 15000:
-            score += 8
-            reasons.append(f"Large network ({network:,} hospitals)")
+        if network > 5000:
+            score += 10
+            why.append(f"{network:,} network hospitals")
 
-        # Restoration benefit
+        # Waiting period
+        ped = policy.get("waiting_period_preexisting_years", 4)
+        if ped <= 2:
+            score += 10
+            why.append(f"Short {ped}-year PED waiting period")
+        elif ped >= 4:
+            score -= 15
+            tradeoffs.append(f"Long {ped}-year pre-existing waiting period")
+
+        # Restoration
         if policy.get("restoration_benefit"):
-            score += 8
-            reasons.append("Restoration benefit included")
+            score += 5
+            why.append("Sum insured restored after claim")
 
-        return max(0, min(100, score)), reasons
+        # Co-pay penalty
+        copay = policy.get("co_pay_percent", 0)
+        if copay and copay > 0:
+            score -= 10
+            tradeoffs.append(f"{copay}% co-payment on every claim")
+
+        # Room rent proportional deduction risk
+        room = policy.get("room_rent_limit") or ""
+        if room and "%" in room:
+            score -= 10
+            tradeoffs.append(f"Room rent capped at {room} — proportional deduction applies")
+
+        return max(0, min(100, score)), why, tradeoffs

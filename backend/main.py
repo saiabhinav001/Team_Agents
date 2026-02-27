@@ -8,7 +8,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import discovery, qa, claim
+from routers import discovery, qa, claim, chat
 
 
 @asynccontextmanager
@@ -42,6 +42,7 @@ app.add_middleware(
 app.include_router(discovery.router)
 app.include_router(qa.router)
 app.include_router(claim.router)
+app.include_router(chat.router)
 
 
 @app.get("/api/health")
@@ -57,6 +58,7 @@ async def root():
         "health": "/api/health",
         "endpoints": [
             "POST /api/discover",
+            "POST /api/discover/chat",
             "POST /api/compare",
             "GET  /api/policies",
             "POST /api/upload",
@@ -66,5 +68,10 @@ async def root():
             "POST /api/extract-conditions-file",
             "POST /api/match-conditions",
             "GET  /api/gap-analysis/{policy_id}",
+            "POST /api/chat/sessions",
+            "GET  /api/chat/sessions",
+            "GET  /api/chat/sessions/{id}",
+            "POST /api/chat/sessions/{id}/messages",
+            "DEL  /api/chat/sessions/{id}",
         ],
     }

@@ -45,6 +45,9 @@ export default function ClaimPage() {
     }).catch(console.error);
   }, []);
 
+  // Clear result whenever policy or diagnosis changes so stale results never persist
+  useEffect(() => { setResult(null); }, [selectedPolicyId, diagnosis]);
+
   async function handleClaimCheck() {
     if (!selectedPolicyId || !diagnosis.trim()) return;
     setLoading(true);
@@ -152,10 +155,10 @@ export default function ClaimPage() {
                 <select
                   value={treatmentType}
                   onChange={(e) => setTreatmentType(e.target.value)}
-                  className="text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5 outline-none"
+                  className="text-sm text-gray-900 font-semibold bg-white border-2 border-gray-400 rounded-lg px-3 py-2 outline-none focus:border-green-500 cursor-pointer"
                 >
                   {["hospitalization", "surgery", "maternity", "opd", "critical_illness"].map((t) => (
-                    <option key={t} value={t}>{t}</option>
+                    <option key={t} value={t} className="text-gray-900">{t.replace("_", " ")}</option>
                   ))}
                 </select>
               </div>
@@ -170,38 +173,101 @@ export default function ClaimPage() {
             </div>
 
             {result?.type === "claim" && !loading && (
-              <div className="space-y-4">
-                {/* Feasibility score */}
+              <div key={`${selectedPolicyId}-${diagnosis}`} className="space-y-4">
+                {/* Result identity header */}
+                <div className="text-xs text-gray-500 bg-gray-50 rounded-xl px-4 py-2.5 border border-gray-100">
+                  Analyzed: <span className="font-semibold text-gray-800">{result.policy_name}</span>
+                  {" · "}<span className="italic text-gray-600">{result.diagnosis}</span>
+                  {" · "}<span className="text-gray-400">{result.chunks_used} policy clauses retrieved</span>
+                </div>
+
+                {/* Coverage status badge + feasibility score */}
                 <div className="bg-white rounded-2xl border border-gray-200 p-5">
                   <div className="flex items-center justify-between mb-3">
-                    <div className="font-bold text-gray-900">Claim Feasibility Score</div>
-                    <div className={`text-3xl font-black ${SCORE_COLOR(result.claim_feasibility_score)}`}>
-                      {result.claim_feasibility_score}/100
+                    <div>
+                      <div className="font-bold text-gray-900 mb-1">Claim Feasibility Score</div>
+                      <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${
+                        result.coverage_status === "covered"
+                          ? "bg-green-100 text-green-800"
+                          : result.coverage_status === "partially_covered"
+                          ? "bg-yellow-100 text-yellow-800"
+                          : result.coverage_status === "excluded"
+                          ? "bg-red-100 text-red-800"
+                          : "bg-gray-100 text-gray-600"
+                      }`}>
+                        {(result.coverage_status || "unknown").replace("_", " ").toUpperCase()}
+                      </span>
+                    </div>
+                    <div className={`text-3xl font-black ${SCORE_COLOR(result.feasibility_score)}`}>
+                      {result.feasibility_score}/100
                     </div>
                   </div>
                   <div className="w-full bg-gray-200 rounded-full h-3 mb-3">
                     <div
-                      className={`h-3 rounded-full ${result.claim_feasibility_score >= 75 ? "bg-green-500" : result.claim_feasibility_score >= 45 ? "bg-yellow-500" : "bg-red-500"}`}
-                      style={{ width: `${result.claim_feasibility_score}%` }}
+                      className={`h-3 rounded-full transition-all ${
+                        result.feasibility_score >= 75 ? "bg-green-500"
+                        : result.feasibility_score >= 45 ? "bg-yellow-500"
+                        : "bg-red-500"
+                      }`}
+                      style={{ width: `${result.feasibility_score}%` }}
                     />
                   </div>
-                  <p className="text-gray-700 text-sm">{result.plain_answer}</p>
+                  <p className="text-gray-700 text-sm">{result.analysis_summary}</p>
                 </div>
 
-                {/* Hidden conditions */}
-                {result.hidden_conditions?.length > 0 && (
-                  <div className="bg-white rounded-2xl border border-gray-200 p-5">
+                {/* Waiting period */}
+                {result.waiting_period && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
+                    <div className="text-xs font-bold text-amber-800 mb-1 flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5" /> Waiting Period
+                    </div>
+                    <p className="text-sm text-amber-900">{result.waiting_period}</p>
+                  </div>
+                )}
+
+                {/* Applicable exclusions */}
+                {result.exclusions_applicable?.length > 0 && (
+                  <div className="bg-white rounded-2xl border border-red-200 p-5">
                     <div className="font-bold text-red-700 flex items-center gap-2 mb-3">
-                      <AlertTriangle className="w-4 h-4" /> {result.hidden_conditions.length} Hidden Conditions
+                      <XCircle className="w-4 h-4" /> {result.exclusions_applicable.length} Applicable Exclusion{result.exclusions_applicable.length > 1 ? "s" : ""}
                     </div>
                     <div className="space-y-2">
-                      {result.hidden_conditions.map((hc: any, i: number) => (
+                      {result.exclusions_applicable.map((excl: string, i: number) => (
                         <div key={i} className="border border-red-100 bg-red-50 rounded-xl p-3">
-                          <p className="text-sm font-semibold text-red-800">{hc.description}</p>
-                          <p className="text-xs text-red-600 mt-1">Impact: {hc.impact}</p>
+                          <p className="text-sm text-red-800">&quot;{excl}&quot;</p>
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {/* Risk flags */}
+                {result.risk_flags?.length > 0 && (
+                  <div className="bg-white rounded-2xl border border-orange-200 p-5">
+                    <div className="font-bold text-orange-700 flex items-center gap-2 mb-3">
+                      <AlertTriangle className="w-4 h-4" /> {result.risk_flags.length} Risk Flag{result.risk_flags.length > 1 ? "s" : ""}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {result.risk_flags.map((flag: string, i: number) => (
+                        <span key={i} className="text-xs bg-orange-50 border border-orange-200 text-orange-800 px-3 py-1 rounded-full">
+                          {flag.replace(/_/g, " ")}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Severity requirements */}
+                {result.severity_requirements?.length > 0 && (
+                  <div className="bg-white rounded-2xl border border-gray-200 p-5">
+                    <div className="font-bold text-gray-900 mb-3">Clinical Criteria Required</div>
+                    <ul className="space-y-1.5">
+                      {result.severity_requirements.map((req: string, i: number) => (
+                        <li key={i} className="flex items-start gap-2 text-sm text-gray-700">
+                          <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" /> {req}
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 )}
 
@@ -216,13 +282,6 @@ export default function ClaimPage() {
                         </li>
                       ))}
                     </ul>
-                  </div>
-                )}
-
-                {result.recommendation && (
-                  <div className="bg-blue-50 border border-blue-100 rounded-2xl p-4">
-                    <div className="text-xs font-bold text-blue-700 mb-1">Recommendation</div>
-                    <p className="text-sm text-blue-900">{result.recommendation}</p>
                   </div>
                 )}
               </div>
